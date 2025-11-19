@@ -484,6 +484,7 @@ def ensure_ruleset_enforcement(
     ruleset_path: str,
     target_branch: str = "main",
     dry_run: bool = False,
+    skip_repositories: Optional[Sequence[str]] | None = None,
 ) -> None:
     logger.info(
         "Ensuring ruleset enforcement for %s '%s' targeting branch '%s'",
@@ -497,6 +498,7 @@ def ensure_ruleset_enforcement(
     summary: Counter = Counter()
     processed_repositories: List[str] = []
     skipped_repositories: List[str] = []
+    skip_set: Set[str] = {repo.lower() for repo in (skip_repositories or [])}
     repositories = enforcer.list_repositories()
     logger.info("Found %d repositories to evaluate", len(repositories))
     for repo in repositories:
@@ -505,6 +507,13 @@ def ensure_ruleset_enforcement(
             repo.name,
             repo.default_branch,
         )
+        if repo.name.lower() in skip_set:
+            logger.info(
+                "Skipping repository '%s': repository listed in --skip-repo",
+                repo.name,
+            )
+            skipped_repositories.append(repo.name)
+            continue
         if repo.archived:
             logger.info("Skipping repository '%s': repository is archived", repo.name)
             skipped_repositories.append(repo.name)
@@ -601,6 +610,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show proposed ruleset changes without applying them",
     )
+    parser.add_argument(
+        "--skip-repository",
+        "--skip-repo",
+        dest="skip_repositories",
+        action="append",
+        default=[],
+        help="Repository name to skip (can be specified multiple times)",
+    )
     args = parser.parse_args()
     if not args.org and not args.user:
         parser.error("--org/--user or corresponding env vars are required")
@@ -627,6 +644,7 @@ def main() -> None:
         args.ruleset_path,
         args.target_branch,
         dry_run=args.dry_run,
+        skip_repositories=args.skip_repositories,
     )
 
 

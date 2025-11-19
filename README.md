@@ -15,11 +15,19 @@ Create a fine-grained personal access token (PAT) with the following permissions
 
 ## Usage
 
+For organisations:
+
 ```bash
 uv run main.py --org my-org --token <token> --ruleset-path ruleset.json --target-branch main
 ```
 
-### Dry run
+For individuals:
+
+```bash
+uv run main.py --user my-user --token <token> --ruleset-path ruleset.json --target-branch main
+```
+
+### Dry Run
 
 Pass `--dry-run` to see the proposed ruleset payloads for each repository without making any API changes. This is useful for validating the resulting configuration before enforcing it:
 

@@ -21,7 +21,7 @@ jobs:
       # Execute the enforcement script
       - name: Execute enforcement script
         run: |
-          uv run main.py --user MattKobayashi --token {{ secrets.GH_ENFORCE_PAT }}
+          uv run main.py --user MattKobayashi --token ${{ secrets.GH_ENFORCE_PAT }}
 name: Enforce Repository Rulesets
 on:
   schedule:

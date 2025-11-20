@@ -88,7 +88,14 @@ class Repository:
 class GitHubRulesetEnforcer:
     """Helper that wraps the GitHub API calls required for enforcement."""
 
-    def __init__(self, owner: str, owner_type: str, token: str) -> None:
+    def __init__(
+        self,
+        owner: str,
+        owner_type: str,
+        token: str,
+        *,
+        excluded_required_checks: Optional[Sequence[str]] | None = None,
+    ) -> None:
         self.owner = owner
         self.owner_type = owner_type
         self.owner_prefix = (
@@ -103,6 +110,7 @@ class GitHubRulesetEnforcer:
                 "User-Agent": USER_AGENT,
             }
         )
+        self.excluded_required_checks: Set[str] = set(excluded_required_checks or [])
         logger.debug("Initialized GitHubRulesetEnforcer for %s '%s'", owner_type, owner)
 
     def list_repositories(self) -> List[Repository]:
@@ -222,7 +230,9 @@ class GitHubRulesetEnforcer:
             if not definition:
                 continue
             if workflow_targets_branch(definition, branch):
-                checks.update(extract_job_names(definition))
+                checks.update(
+                    extract_job_names(definition, self.excluded_required_checks)
+                )
         logger.debug(
             "Collected %d required checks for repository '%s'",
             len(checks),
@@ -394,13 +404,20 @@ def branch_matches(event_config, branch: str) -> bool:
     return True
 
 
-def extract_job_names(workflow: Dict) -> Set[str]:
+def extract_job_names(workflow: Dict, excluded_checks: Set[str]) -> Set[str]:
     jobs = workflow.get("jobs") or {}
     names: Set[str] = set()
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        names.add(job.get("name") or job_id)
+        job_name = job.get("name") or job_id
+        if job_name in excluded_checks:
+            logger.debug(
+                "Skipping job '%s' from required status checks due to exclusion list",
+                job_name,
+            )
+            continue
+        names.add(job_name)
     return names
 
 
@@ -485,6 +502,7 @@ def ensure_ruleset_enforcement(
     target_branch: str = "main",
     dry_run: bool = False,
     skip_repositories: Optional[Sequence[str]] | None = None,
+    excluded_required_checks: Optional[Sequence[str]] | None = None,
 ) -> None:
     logger.info(
         "Ensuring ruleset enforcement for %s '%s' targeting branch '%s'",
@@ -492,7 +510,12 @@ def ensure_ruleset_enforcement(
         owner,
         target_branch,
     )
-    enforcer = GitHubRulesetEnforcer(owner, owner_type, token)
+    enforcer = GitHubRulesetEnforcer(
+        owner,
+        owner_type,
+        token,
+        excluded_required_checks=excluded_required_checks,
+    )
     template_ruleset = load_ruleset_template(ruleset_path)
 
     summary: Counter = Counter()
@@ -618,6 +641,16 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Repository name to skip (can be specified multiple times)",
     )
+    parser.add_argument(
+        "--exclude-required-check",
+        dest="excluded_required_checks",
+        action="append",
+        default=[],
+        help=(
+            "Workflow job name to exclude from required status checks (can be"
+            " specified multiple times)"
+        ),
+    )
     args = parser.parse_args()
     if not args.org and not args.user:
         parser.error("--org/--user or corresponding env vars are required")
@@ -645,6 +678,7 @@ def main() -> None:
         args.target_branch,
         dry_run=args.dry_run,
         skip_repositories=args.skip_repositories,
+        excluded_required_checks=args.excluded_required_checks,
     )
 
 

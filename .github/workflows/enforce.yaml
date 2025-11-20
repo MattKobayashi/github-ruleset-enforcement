@@ -21,11 +21,15 @@ jobs:
       # Execute the enforcement script
       - name: Execute enforcement script
         run: |
-          uv run main.py --user MattKobayashi --token ${{ secrets.GH_ENFORCE_PAT }}
+          uv run main.py \
+            --exclude-required-check Analyze \
+            --exclude-required-check dependency-review \
+            --token ${{ secrets.GH_ENFORCE_PAT }} \
+            --user MattKobayashi
 name: Enforce Repository Rulesets
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "20 4 * * *"
   workflow_dispatch:
 permissions:
   contents: read

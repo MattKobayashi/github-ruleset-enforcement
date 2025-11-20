@@ -30,8 +30,8 @@ uv run main.py --user my-user --token <token> --ruleset-path ruleset.json --targ
 Available options:
 
 ```shell
-usage: main.py [-h] [--org ORG] [--user USER] --token TOKEN [--ruleset-path RULESET_PATH] [--target-branch TARGET_BRANCH] [--dry-run]
-               [--skip-repository SKIP_REPOSITORIES]
+usage: main.py [-h] [--org ORG] [--user USER] --token TOKEN [--ruleset-path RULESET_PATH] [--target-branch TARGET_BRANCH]
+               [--dry-run] [--skip-repository SKIP_REPOSITORIES] [--exclude-required-check EXCLUDED_REQUIRED_CHECKS]
 
 Ensure a GitHub ruleset is enforced across an owner account.
 
@@ -47,6 +47,8 @@ options:
   --dry-run             Show proposed ruleset changes without applying them
   --skip-repository, --skip-repo SKIP_REPOSITORIES
                         Repository name to skip (can be specified multiple times)
+  --exclude-required-check EXCLUDED_REQUIRED_CHECKS
+                        Workflow job name to exclude from required status checks (can be specified multiple times)
 ```
 
 ### Dry Run
@@ -59,8 +61,16 @@ uv run main.py --user my-user --token <token> --dry-run
 
 ### Skipping repositories
 
-Provide `--skip-repository repo-name` (repeatable) to exclude specific repositories from enforcement:
+Pass `--skip-repository repo-name` (repeatable) to exclude specific repositories from enforcement:
 
 ```shell
 uv run main.py --org my-org --token <token> --skip-repository legacy-repo --skip-repository sandbox
+```
+
+### Excluding jobs from required checks
+
+Pass `--exclude-required-check` (repeatable) to exclude specific workflow job names from being added as required checks:
+
+```shell
+uv run main.py --org my-org --token <token> --exclude-required-check Analyze --exclude-required-check dependency-review
 ```

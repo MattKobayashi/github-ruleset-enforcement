@@ -73,7 +73,54 @@ READ_ONLY_RULESET_FIELDS: set[str] = {
     "_links",
     "created_at",
     "updated_at",
+    "current_user_can_bypass",
 }
+
+
+def _normalize_for_comparison(
+    obj: dict | list | str | int | bool | None,
+) -> dict | list | str | int | bool | None:
+    """Recursively normalize a structure for comparison by sorting lists and dicts."""
+    if isinstance(obj, dict):
+        return {k: _normalize_for_comparison(v) for k, v in sorted(obj.items())}
+    if isinstance(obj, list):
+        # Sort lists of dicts by their JSON representation for consistent comparison
+        normalized = [_normalize_for_comparison(item) for item in obj]
+        try:
+            return sorted(normalized, key=lambda x: json.dumps(x, sort_keys=True))
+        except TypeError:
+            # If items aren't comparable, keep original order
+            return normalized
+    return obj
+
+
+def rulesets_are_equal(existing: dict, new_payload: dict) -> bool:
+    """Compare two rulesets for equality, ignoring read-only fields."""
+    existing_filtered = {
+        k: v for k, v in existing.items() if k not in READ_ONLY_RULESET_FIELDS
+    }
+    normalized_existing = _normalize_for_comparison(existing_filtered)
+    normalized_new = _normalize_for_comparison(new_payload)
+    are_equal = normalized_existing == normalized_new
+    if not are_equal:
+        logger.debug(
+            "Ruleset comparison - existing keys: %s, new keys: %s",
+            sorted(existing_filtered.keys()),
+            sorted(new_payload.keys()),
+        )
+        for key in set(existing_filtered.keys()) | set(new_payload.keys()):
+            existing_val = existing_filtered.get(key)
+            new_val = new_payload.get(key)
+            if _normalize_for_comparison(existing_val) != _normalize_for_comparison(
+                new_val
+            ):
+                logger.debug(
+                    "Ruleset difference in key '%s': existing=%s, new=%s",
+                    key,
+                    json.dumps(existing_val, indent=2),
+                    json.dumps(new_val, indent=2),
+                )
+    return are_equal
 
 
 @dataclass
@@ -293,23 +340,48 @@ class GitHubRulesetEnforcer:
         if response.status_code >= 400:
             raise GitHubAPIError(response.status_code, self._format_error(response))
 
+    def get_ruleset(self, repository: str, ruleset_id: int) -> dict:
+        """Fetch the full ruleset definition by ID."""
+        logger.debug(
+            "Fetching ruleset id=%s from repository '%s'", ruleset_id, repository
+        )
+        response = self.session.get(
+            f"{GITHUB_API_URL}/repos/{self.owner}/{repository}/rulesets/{ruleset_id}",
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise GitHubAPIError(response.status_code, self._format_error(response))
+        return response.json()
+
     def upsert_ruleset(
         self, repository: str, definition: dict, dry_run: bool = False
     ) -> str:
         payload = self._prepare_ruleset_payload(definition)
-        existing = self.find_ruleset(repository, definition.get("name", ""))
+        existing_summary = self.find_ruleset(repository, definition.get("name", ""))
 
-        match (bool(existing), dry_run):
+        if existing_summary:
+            # Fetch the full ruleset to compare
+            existing = self.get_ruleset(repository, existing_summary["id"])
+            if rulesets_are_equal(existing, payload):
+                logger.info(
+                    "Ruleset '%s' (id=%s) in repository '%s' is already up-to-date",
+                    payload.get("name"),
+                    existing_summary["id"],
+                    repository,
+                )
+                return "unchanged"
+
+        match (bool(existing_summary), dry_run):
             case (True, True):
                 logger.info(
                     "[dry-run] Would update ruleset '%s' (id=%s) in repository '%s'",
                     payload.get("name"),
-                    existing["id"],
+                    existing_summary["id"],
                     repository,
                 )
                 action = "dry_run_update"
             case (True, False):
-                self.update_ruleset(repository, existing["id"], payload)
+                self.update_ruleset(repository, existing_summary["id"], payload)
                 action = "updated"
             case (False, True):
                 logger.info(
@@ -593,6 +665,7 @@ def _print_summary(
     actions = {
         "created": "Rulesets created",
         "updated": "Rulesets updated",
+        "unchanged": "Rulesets already up-to-date",
         "dry_run_create": "Rulesets to create",
         "dry_run_update": "Rulesets to update",
     }
@@ -614,9 +687,7 @@ def parse_args() -> argparse.Namespace:
         "--user", default=os.environ.get("GITHUB_USER"), help="GitHub user name"
     )
     parser.add_argument(
-        "--token",
-        help="GitHub token with admin:org scope",
-        required=True
+        "--token", help="GitHub token with admin:org scope", required=True
     )
     parser.add_argument(
         "--ruleset-path",

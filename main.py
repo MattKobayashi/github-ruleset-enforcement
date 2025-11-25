@@ -12,8 +12,9 @@ import logging
 import os
 import re
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from pathlib import Path
 
 import requests
 import yaml
@@ -64,7 +65,7 @@ class GitHubAPIError(RuntimeError):
         self.detail = detail
 
 
-READ_ONLY_RULESET_FIELDS: Set[str] = {
+READ_ONLY_RULESET_FIELDS: set[str] = {
     "id",
     "source",
     "source_type",
@@ -94,7 +95,7 @@ class GitHubRulesetEnforcer:
         owner_type: str,
         token: str,
         *,
-        excluded_required_checks: Optional[Sequence[str]] | None = None,
+        excluded_required_checks: Sequence[str] | None = None,
     ) -> None:
         self.owner = owner
         self.owner_type = owner_type
@@ -110,32 +111,31 @@ class GitHubRulesetEnforcer:
                 "User-Agent": USER_AGENT,
             }
         )
-        self.excluded_required_checks: Set[str] = set(excluded_required_checks or [])
+        self.excluded_required_checks: set[str] = set(excluded_required_checks or [])
         logger.debug("Initialized GitHubRulesetEnforcer for %s '%s'", owner_type, owner)
 
-    def list_repositories(self) -> List[Repository]:
+    def list_repositories(self) -> list[Repository]:
         logger.debug("Fetching repositories for owner '%s'", self.owner)
-        repos: List[Repository] = []
+
         if self.owner_type == "org":
             repos_endpoint = f"{self.owner_prefix}/repos"
             params = {"per_page": 100, "type": "all"}
         else:
             repos_endpoint = "/user/repos"
             params = {"per_page": 100, "visibility": "all", "affiliation": "owner"}
-        for repo in self._paginate(repos_endpoint, params=params):
-            if (
-                self.owner_type == "user"
-                and repo.get("owner", {}).get("login", "").lower() != self.owner.lower()
-            ):
-                continue
-            repos.append(
-                Repository(
-                    name=repo["name"],
-                    default_branch=repo.get("default_branch", "main"),
-                    archived=repo.get("archived", False),
-                    fork=repo.get("fork", False),
-                )
+
+        repos = [
+            Repository(
+                name=repo["name"],
+                default_branch=repo.get("default_branch", "main"),
+                archived=repo.get("archived", False),
+                fork=repo.get("fork", False),
             )
+            for repo in self._paginate(repos_endpoint, params=params)
+            if self.owner_type == "org"
+            or repo.get("owner", {}).get("login", "").lower() == self.owner.lower()
+        ]
+
         logger.debug("Fetched %d repositories for owner '%s'", len(repos), self.owner)
         return repos
 
@@ -155,7 +155,7 @@ class GitHubRulesetEnforcer:
         logger.debug("Branch '%s' exists in repository '%s'", branch, repository)
         return True
 
-    def list_workflows(self, repository: str) -> List[Dict]:
+    def list_workflows(self, repository: str) -> list[dict]:
         logger.debug("Listing workflows for repository '%s'", repository)
         return list(
             self._paginate(
@@ -167,7 +167,7 @@ class GitHubRulesetEnforcer:
 
     def fetch_workflow_definition(
         self, repository: str, path: str, ref: str
-    ) -> Optional[Dict]:
+    ) -> dict | None:
         logger.debug(
             "Fetching workflow definition for repository '%s', path '%s', ref '%s'",
             repository,
@@ -200,13 +200,13 @@ class GitHubRulesetEnforcer:
 
     def collect_required_checks_for_repository(
         self, repository: Repository, branch: str
-    ) -> Set[str]:
+    ) -> set[str]:
         logger.debug(
             "Collecting required checks for repository '%s' on branch '%s'",
             repository.name,
             branch,
         )
-        checks: Set[str] = set()
+        checks: set[str] = set()
         try:
             workflows = self.list_workflows(repository.name)
         except GitHubAPIError as exc:
@@ -240,23 +240,33 @@ class GitHubRulesetEnforcer:
         )
         return checks
 
-    def find_ruleset(self, repository: str, name: str) -> Optional[Dict]:
+    def find_ruleset(self, repository: str, name: str) -> dict | None:
         logger.debug("Searching for ruleset '%s' in repository '%s'", name, repository)
         endpoint = f"/repos/{self.owner}/{repository}/rulesets"
         params = {"per_page": 100, "includes_parents": "false"}
-        for ruleset in self._paginate(endpoint, params=params):
-            if ruleset.get("name") == name:
-                logger.debug(
-                    "Found existing ruleset '%s' (id=%s) in repository '%s'",
-                    name,
-                    ruleset.get("id"),
-                    repository,
-                )
-                return ruleset
-        logger.debug("Ruleset '%s' not found in repository '%s'", name, repository)
-        return None
 
-    def create_ruleset(self, repository: str, payload: Dict) -> None:
+        ruleset = next(
+            (
+                r
+                for r in self._paginate(endpoint, params=params)
+                if r.get("name") == name
+            ),
+            None,
+        )
+
+        if ruleset:
+            logger.debug(
+                "Found existing ruleset '%s' (id=%s) in repository '%s'",
+                name,
+                ruleset.get("id"),
+                repository,
+            )
+        else:
+            logger.debug("Ruleset '%s' not found in repository '%s'", name, repository)
+
+        return ruleset
+
+    def create_ruleset(self, repository: str, payload: dict) -> None:
         logger.info(
             "Creating ruleset '%s' in repository '%s'", payload.get("name"), repository
         )
@@ -268,7 +278,7 @@ class GitHubRulesetEnforcer:
         if response.status_code >= 400:
             raise GitHubAPIError(response.status_code, self._format_error(response))
 
-    def update_ruleset(self, repository: str, ruleset_id: int, payload: Dict) -> None:
+    def update_ruleset(self, repository: str, ruleset_id: int, payload: dict) -> None:
         logger.info(
             "Updating ruleset '%s' (id=%s) in repository '%s'",
             payload.get("name"),
@@ -284,13 +294,13 @@ class GitHubRulesetEnforcer:
             raise GitHubAPIError(response.status_code, self._format_error(response))
 
     def upsert_ruleset(
-        self, repository: str, definition: Dict, dry_run: bool = False
+        self, repository: str, definition: dict, dry_run: bool = False
     ) -> str:
         payload = self._prepare_ruleset_payload(definition)
         existing = self.find_ruleset(repository, definition.get("name", ""))
-        action: str
-        if existing:
-            if dry_run:
+
+        match (bool(existing), dry_run):
+            case (True, True):
                 logger.info(
                     "[dry-run] Would update ruleset '%s' (id=%s) in repository '%s'",
                     payload.get("name"),
@@ -298,20 +308,20 @@ class GitHubRulesetEnforcer:
                     repository,
                 )
                 action = "dry_run_update"
-            else:
+            case (True, False):
                 self.update_ruleset(repository, existing["id"], payload)
                 action = "updated"
-        else:
-            if dry_run:
+            case (False, True):
                 logger.info(
                     "[dry-run] Would create ruleset '%s' in repository '%s'",
                     payload.get("name"),
                     repository,
                 )
                 action = "dry_run_create"
-            else:
+            case (False, False):
                 self.create_ruleset(repository, payload)
                 action = "created"
+
         if dry_run:
             logger.debug(
                 "[dry-run] Ruleset payload for '%s': %s",
@@ -326,20 +336,19 @@ class GitHubRulesetEnforcer:
             )
         return action
 
-    def _prepare_ruleset_payload(self, definition: Dict) -> Dict:
-        payload: Dict = {}
-        for key, value in definition.items():
-            if key in READ_ONLY_RULESET_FIELDS:
-                continue
-            payload[key] = copy.deepcopy(value)
-        return payload
+    def _prepare_ruleset_payload(self, definition: dict) -> dict:
+        return {
+            key: copy.deepcopy(value)
+            for key, value in definition.items()
+            if key not in READ_ONLY_RULESET_FIELDS
+        }
 
     def _paginate(
         self,
         endpoint: str,
         *,
-        params: Optional[Dict] = None,
-        data_key: Optional[str] = None,
+        params: dict | None = None,
+        data_key: str | None = None,
     ) -> Iterable:
         url = endpoint if endpoint.startswith("http") else f"{GITHUB_API_URL}{endpoint}"
         next_params = params
@@ -348,48 +357,39 @@ class GitHubRulesetEnforcer:
             if response.status_code >= 400:
                 raise GitHubAPIError(response.status_code, self._format_error(response))
             body = response.json()
-            if data_key:
-                items = body.get(data_key, [])
-            elif isinstance(body, list):
-                items = body
-            else:
-                items = body
-            for item in items:
-                yield item
+            items = body.get(data_key, []) if data_key else body
+            yield from items
             url = response.links.get("next", {}).get("url")
             next_params = None
 
     @staticmethod
     def _format_error(response: requests.Response) -> str:
-        detail = response.text
         try:
-            detail = json.dumps(response.json())
+            return json.dumps(response.json())
         except ValueError:
-            pass
-        return detail
+            return response.text
 
 
-def workflow_targets_branch(workflow: Dict, branch: str) -> bool:
-    triggers = workflow.get("on")
-    event_map = normalize_events(triggers)
-    for event_name in ("pull_request", "pull_request_target"):
-        if event_name not in event_map:
-            continue
-        if branch_matches(event_map[event_name], branch):
-            return True
-    return False
+def workflow_targets_branch(workflow: dict, branch: str) -> bool:
+    event_map = normalize_events(workflow.get("on"))
+    return any(
+        event_name in event_map and branch_matches(event_map[event_name], branch)
+        for event_name in ("pull_request", "pull_request_target")
+    )
 
 
-def normalize_events(triggers) -> Dict:
-    if triggers is None:
-        return {}
-    if isinstance(triggers, str):
-        return {triggers: None}
-    if isinstance(triggers, list):
-        return {event: None for event in triggers}
-    if isinstance(triggers, dict):
-        return triggers
-    return {}
+def normalize_events(triggers) -> dict:
+    match triggers:
+        case None:
+            return {}
+        case str():
+            return {triggers: None}
+        case list():
+            return {event: None for event in triggers}
+        case dict():
+            return triggers
+        case _:
+            return {}
 
 
 def branch_matches(event_config, branch: str) -> bool:
@@ -404,9 +404,9 @@ def branch_matches(event_config, branch: str) -> bool:
     return True
 
 
-def extract_job_names(workflow: Dict, excluded_checks: Set[str]) -> Set[str]:
+def extract_job_names(workflow: dict, excluded_checks: set[str]) -> set[str]:
     jobs = workflow.get("jobs") or {}
-    names: Set[str] = set()
+    names: set[str] = set()
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
             continue
@@ -416,25 +416,26 @@ def extract_job_names(workflow: Dict, excluded_checks: Set[str]) -> Set[str]:
                 "Skipping job '%s' from required status checks due to exclusion list",
                 job_name,
             )
-            continue
-        names.add(job_name)
+        else:
+            names.add(job_name)
     return names
 
 
-def to_list(value: Optional[Sequence[str] | str]) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value]
-    return list(value)
+def to_list(value: Sequence[str] | str | None) -> list[str]:
+    match value:
+        case None:
+            return []
+        case str():
+            return [value]
+        case _:
+            return list(value)
 
 
-def load_ruleset_template(path: str) -> Dict:
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+def load_ruleset_template(path: str) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def ensure_required_status_rule(ruleset: Dict, required_checks: Set[str]) -> None:
+def ensure_required_status_rule(ruleset: dict, required_checks: set[str]) -> None:
     rules = ruleset.setdefault("rules", [])
     if not required_checks:
         before = len(rules)
@@ -467,14 +468,13 @@ def ensure_required_status_rule(ruleset: Dict, required_checks: Set[str]) -> Non
         rules.append(rule)
     parameters = rule.setdefault("parameters", {})
     existing_checks = parameters.get("required_status_checks", []) or []
-    checks_by_context: Dict[str, Dict] = {}
+    checks_by_context: dict[str, dict] = {}
     for check in existing_checks:
-        if isinstance(check, dict):
-            context = check.get("context")
-            if context:
+        match check:
+            case {"context": str() as context}:
                 checks_by_context[context] = check
-        elif isinstance(check, str):
-            checks_by_context[check] = {"context": check}
+            case str() as context:
+                checks_by_context[context] = {"context": context}
 
     for context in required_checks:
         checks_by_context.setdefault(context, {"context": context})
@@ -489,7 +489,7 @@ def ensure_required_status_rule(ruleset: Dict, required_checks: Set[str]) -> Non
     )
 
 
-def ensure_repository_condition(ruleset: Dict) -> None:
+def ensure_repository_condition(ruleset: dict) -> None:
     ruleset.setdefault("enforcement", "active")
     ruleset.setdefault("conditions", {})
 
@@ -501,8 +501,8 @@ def ensure_ruleset_enforcement(
     ruleset_path: str,
     target_branch: str = "main",
     dry_run: bool = False,
-    skip_repositories: Optional[Sequence[str]] | None = None,
-    excluded_required_checks: Optional[Sequence[str]] | None = None,
+    skip_repositories: Sequence[str] | None = None,
+    excluded_required_checks: Sequence[str] | None = None,
 ) -> None:
     logger.info(
         "Ensuring ruleset enforcement for %s '%s' targeting branch '%s'",
@@ -519,9 +519,9 @@ def ensure_ruleset_enforcement(
     template_ruleset = load_ruleset_template(ruleset_path)
 
     summary: Counter = Counter()
-    processed_repositories: List[str] = []
-    skipped_repositories: List[str] = []
-    skip_set: Set[str] = {repo.lower() for repo in (skip_repositories or [])}
+    processed_repositories: list[str] = []
+    skipped_repositories: list[str] = []
+    skip_set: set[str] = {repo.lower() for repo in (skip_repositories or [])}
     repositories = enforcer.list_repositories()
     logger.info("Found %d repositories to evaluate", len(repositories))
     for repo in repositories:
@@ -549,7 +549,7 @@ def ensure_ruleset_enforcement(
         repo_ruleset = copy.deepcopy(template_ruleset)
         ensure_repository_condition(repo_ruleset)
 
-        required_checks: Set[str] = set()
+        required_checks: set[str] = set()
         if enforcer.branch_exists(repo.name, target_branch):
             required_checks = enforcer.collect_required_checks_for_repository(
                 repo, target_branch
@@ -574,7 +574,7 @@ def ensure_ruleset_enforcement(
 
 
 def _print_summary(
-    summary: Counter, processed: List[str], skipped: List[str], dry_run: bool
+    summary: Counter, processed: list[str], skipped: list[str], dry_run: bool
 ) -> None:
     mode = "dry-run" if dry_run else "execution"
     logger.info("\n===== Ruleset enforcement %s summary =====", mode)

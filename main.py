@@ -73,6 +73,7 @@ READ_ONLY_RULESET_FIELDS: set[str] = {
     "_links",
     "created_at",
     "updated_at",
+    "current_user_can_bypass",
 }
 
 
@@ -100,7 +101,26 @@ def rulesets_are_equal(existing: dict, new_payload: dict) -> bool:
     }
     normalized_existing = _normalize_for_comparison(existing_filtered)
     normalized_new = _normalize_for_comparison(new_payload)
-    return normalized_existing == normalized_new
+    are_equal = normalized_existing == normalized_new
+    if not are_equal:
+        logger.debug(
+            "Ruleset comparison - existing keys: %s, new keys: %s",
+            sorted(existing_filtered.keys()),
+            sorted(new_payload.keys()),
+        )
+        for key in set(existing_filtered.keys()) | set(new_payload.keys()):
+            existing_val = existing_filtered.get(key)
+            new_val = new_payload.get(key)
+            if _normalize_for_comparison(existing_val) != _normalize_for_comparison(
+                new_val
+            ):
+                logger.debug(
+                    "Ruleset difference in key '%s': existing=%s, new=%s",
+                    key,
+                    json.dumps(existing_val, indent=2),
+                    json.dumps(new_val, indent=2),
+                )
+    return are_equal
 
 
 @dataclass

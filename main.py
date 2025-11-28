@@ -503,8 +503,112 @@ def to_list(value: Sequence[str] | str | None) -> list[str]:
             return list(value)
 
 
-def load_ruleset_template(path: str) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+DEFAULT_TEMPLATE_SOURCE = "MattKobayashi/github-ruleset-enforcement"
+DEFAULT_TEMPLATES_DIR = "templates"
+DEFAULT_TEMPLATE_FILENAME = "default.json"
+
+
+def load_default_template(templates_dir: str) -> dict:
+    """Load the default ruleset template from the templates directory."""
+    default_path = Path(templates_dir) / DEFAULT_TEMPLATE_FILENAME
+    if not default_path.exists():
+        raise FileNotFoundError(
+            f"Default template not found at '{default_path}'. "
+            f"Ensure '{DEFAULT_TEMPLATE_FILENAME}' exists in the templates directory."
+        )
+    return json.loads(default_path.read_text(encoding="utf-8"))
+
+
+def load_all_templates(templates_dir: str) -> tuple[dict, dict[str, dict]]:
+    """Load all templates from the templates directory.
+
+    Returns a tuple of (default_template, repo_templates) where:
+    - default_template: The default template (from default.json or matching DEFAULT_TEMPLATE_SOURCE)
+    - repo_templates: A dict mapping repository names to their templates
+    """
+    templates_path = Path(templates_dir)
+    repo_templates: dict[str, dict] = {}
+    default_template: dict | None = None
+
+    if not templates_path.exists():
+        raise FileNotFoundError(f"Templates directory '{templates_dir}' does not exist")
+
+    for template_file in templates_path.glob("*.json"):
+        try:
+            template = json.loads(template_file.read_text(encoding="utf-8"))
+            source = template.get("source", "")
+
+            # Check if this is the default template
+            if source == DEFAULT_TEMPLATE_SOURCE:
+                if default_template is None:
+                    default_template = template
+                    logger.debug(
+                        "Loaded default template from '%s' (source: %s)",
+                        template_file.name,
+                        source,
+                    )
+                else:
+                    logger.warning(
+                        "Multiple default templates found. Ignoring '%s'",
+                        template_file.name,
+                    )
+                continue
+
+            # Extract repository name from source (format: "owner/repo")
+            if "/" in source:
+                repo_name = source.split("/", 1)[1]
+                repo_templates[repo_name] = template
+                logger.debug(
+                    "Loaded repository-specific template for '%s' from '%s'",
+                    repo_name,
+                    template_file.name,
+                )
+            else:
+                logger.warning(
+                    "Template '%s' has invalid source format: '%s'",
+                    template_file.name,
+                    source,
+                )
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to parse template '%s': %s", template_file.name, exc
+            )
+
+    if default_template is None:
+        raise FileNotFoundError(
+            f"No default template found in '{templates_dir}'. "
+            f"Ensure a template with source '{DEFAULT_TEMPLATE_SOURCE}' exists."
+        )
+
+    logger.info(
+        "Loaded default template and %d repository-specific templates from '%s'",
+        len(repo_templates),
+        templates_dir,
+    )
+    return default_template, repo_templates
+
+
+def get_template_for_repository(
+    repo_name: str,
+    repo_templates: dict[str, dict],
+    default_template: dict,
+) -> dict:
+    """Get the appropriate template for a repository.
+
+    Returns a repository-specific template if one exists, otherwise the default template.
+    """
+    if repo_name in repo_templates:
+        logger.debug(
+            "Using repository-specific template for '%s'",
+            repo_name,
+        )
+        return repo_templates[repo_name]
+
+    logger.debug(
+        "Using default template for '%s'",
+        repo_name,
+    )
+    return default_template
 
 
 def ensure_required_status_rule(ruleset: dict, required_checks: set[str]) -> None:
@@ -570,7 +674,7 @@ def ensure_ruleset_enforcement(
     owner: str,
     owner_type: str,
     token: str,
-    ruleset_path: str,
+    templates_dir: str = DEFAULT_TEMPLATES_DIR,
     target_branch: str = "main",
     dry_run: bool = False,
     skip_repositories: Sequence[str] | None = None,
@@ -588,7 +692,9 @@ def ensure_ruleset_enforcement(
         token,
         excluded_required_checks=excluded_required_checks,
     )
-    template_ruleset = load_ruleset_template(ruleset_path)
+
+    # Load all templates (default + repository-specific)
+    default_template, repo_templates = load_all_templates(templates_dir)
 
     summary: Counter = Counter()
     processed_repositories: list[str] = []
@@ -618,16 +724,20 @@ def ensure_ruleset_enforcement(
             skipped_repositories.append(repo.name)
             continue
         processed_repositories.append(repo.name)
-        repo_ruleset = copy.deepcopy(template_ruleset)
+
+        # Get the appropriate template for this repository
+        template = get_template_for_repository(repo.name, repo_templates, default_template)
+        repo_ruleset = copy.deepcopy(template)
         ensure_repository_condition(repo_ruleset)
 
+        # Always collect workflow-based required checks for PR-triggered jobs
         required_checks: set[str] = set()
         if enforcer.branch_exists(repo.name, target_branch):
             required_checks = enforcer.collect_required_checks_for_repository(
                 repo, target_branch
             )
             logger.debug(
-                "Repository '%s' required checks: %s",
+                "Repository '%s' required checks from workflows: %s",
                 repo.name,
                 sorted(required_checks),
             )
@@ -638,11 +748,42 @@ def ensure_ruleset_enforcement(
                 repo.name,
             )
 
-        ensure_required_status_rule(repo_ruleset, required_checks)
+        # For repository-specific templates, merge workflow checks with existing checks
+        if repo.name in repo_templates:
+            # Get existing required_status_checks from the template
+            existing_checks = _extract_existing_status_checks(repo_ruleset)
+            # Combine with workflow-discovered checks
+            all_checks = existing_checks | required_checks
+            logger.debug(
+                "Repository '%s' combined checks (template + workflow): %s",
+                repo.name,
+                sorted(all_checks),
+            )
+            ensure_required_status_rule(repo_ruleset, all_checks)
+        else:
+            ensure_required_status_rule(repo_ruleset, required_checks)
+
         action = enforcer.upsert_ruleset(repo.name, repo_ruleset, dry_run=dry_run)
         summary[action] += 1
 
     _print_summary(summary, processed_repositories, skipped_repositories, dry_run)
+
+
+def _extract_existing_status_checks(ruleset: dict) -> set[str]:
+    """Extract existing required status check contexts from a ruleset."""
+    checks: set[str] = set()
+    rules = ruleset.get("rules", [])
+    for rule in rules:
+        if rule.get("type") == "required_status_checks":
+            params = rule.get("parameters", {})
+            for check in params.get("required_status_checks", []):
+                if isinstance(check, dict):
+                    context = check.get("context")
+                    if context:
+                        checks.add(context)
+                elif isinstance(check, str):
+                    checks.add(check)
+    return checks
 
 
 def _print_summary(
@@ -690,9 +831,13 @@ def parse_args() -> argparse.Namespace:
         "--token", help="GitHub token with admin:org scope", required=True
     )
     parser.add_argument(
-        "--ruleset-path",
-        default="templates/ruleset.json",
-        help="Path to the ruleset template JSON file",
+        "--templates-dir",
+        default=DEFAULT_TEMPLATES_DIR,
+        help=(
+            "Directory containing ruleset templates. The default template must have "
+            f"source '{DEFAULT_TEMPLATE_SOURCE}'. Repository-specific templates are "
+            "identified by a different source field in 'owner/repo' format."
+        ),
     )
     parser.add_argument(
         "--target-branch",
@@ -745,8 +890,8 @@ def main() -> None:
         owner,
         owner_type,
         args.token,
-        args.ruleset_path,
-        args.target_branch,
+        templates_dir=args.templates_dir,
+        target_branch=args.target_branch,
         dry_run=args.dry_run,
         skip_repositories=args.skip_repositories,
         excluded_required_checks=args.excluded_required_checks,

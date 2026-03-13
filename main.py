@@ -312,6 +312,7 @@ class GitHubRulesetEnforcer:
         workflow: dict,
         *,
         include_workflow_name: bool = True,
+        context_prefix: tuple[str, ...] = (),
         workflow_ref: str | None = None,
         visited_workflows: set[tuple[str, str, str]] | None = None,
     ) -> set[str]:
@@ -334,6 +335,23 @@ class GitHubRulesetEnforcer:
             if not isinstance(job, dict):
                 continue
 
+            job_name = job.get("name") or job_id
+            if job_name in self.excluded_required_checks:
+                logger.debug(
+                    "Skipping job '%s' from required status checks due to exclusion list",
+                    job_name,
+                )
+                continue
+
+            next_prefix = (
+                (*context_prefix, workflow_label, job_name)
+                if include_workflow_name
+                else (*context_prefix, job_name)
+            )
+            reusable_prefix = (*context_prefix, workflow_label, job_name)
+            if not include_workflow_name:
+                reusable_prefix = (*context_prefix, job_name)
+
             reusable_reference = reusable_workflow_reference(job)
             if reusable_reference:
                 reusable_owner, reusable_repo, reusable_path, reusable_ref = (
@@ -351,7 +369,8 @@ class GitHubRulesetEnforcer:
                             reusable_owner,
                             reusable_repo,
                             reusable_definition,
-                            include_workflow_name=True,
+                            include_workflow_name=False,
+                            context_prefix=reusable_prefix,
                             workflow_ref=reusable_ref,
                             visited_workflows=visited,
                         )
@@ -372,25 +391,20 @@ class GitHubRulesetEnforcer:
                             owner,
                             repository,
                             reusable_definition,
-                            include_workflow_name=True,
+                            include_workflow_name=False,
+                            context_prefix=reusable_prefix,
                             workflow_ref=workflow_ref,
                             visited_workflows=visited,
                         )
                     )
                 continue
 
-            job_name = job.get("name") or job_id
-            if job_name in self.excluded_required_checks:
-                logger.debug(
-                    "Skipping job '%s' from required status checks due to exclusion list",
-                    job_name,
-                )
-                continue
             names.update(
                 extract_job_contexts(
                     {"name": workflow_label, "jobs": {job_id: job}},
                     self.excluded_required_checks,
                     include_workflow_name=include_workflow_name,
+                    context_prefix=context_prefix,
                 )
             )
 
@@ -641,6 +655,7 @@ def extract_job_contexts(
     excluded_checks: set[str],
     *,
     include_workflow_name: bool = True,
+    context_prefix: tuple[str, ...] = (),
 ) -> set[str]:
     jobs = workflow.get("jobs") or {}
     workflow_label = workflow_name(workflow, "Workflow")
@@ -655,9 +670,12 @@ def extract_job_contexts(
                 job_name,
             )
             continue
-        names.add(
-            f"{workflow_label} / {job_name}" if include_workflow_name else job_name
-        )
+        context_parts = [*context_prefix]
+        if include_workflow_name:
+            context_parts.extend([workflow_label, job_name])
+        else:
+            context_parts.append(job_name)
+        names.add(" / ".join(context_parts))
     return names
 
 

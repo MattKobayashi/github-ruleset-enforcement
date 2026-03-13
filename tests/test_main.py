@@ -11,8 +11,9 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
         root_workflow = {
             "name": "CI",
             "jobs": {
-                "test": {
-                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main"
+                "image": {
+                    "name": "Image",
+                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main",
                 }
             },
         }
@@ -38,7 +39,7 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow
         )
 
-        self.assertEqual(checks, {"Test / Image"})
+        self.assertEqual(checks, {"CI / Image / Image"})
 
     def test_repository_defined_workflow_uses_job_name_only(self) -> None:
         workflow = {
@@ -58,7 +59,9 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
     def test_local_reusable_workflow_context_uses_default_branch(self) -> None:
         root_workflow = {
             "name": "CI",
-            "jobs": {"test": {"uses": "./.github/workflows/test.yaml"}},
+            "jobs": {
+                "image": {"name": "Image", "uses": "./.github/workflows/test.yaml"}
+            },
         }
         reusable_workflow = {
             "name": "Test",
@@ -78,12 +81,14 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow
         )
 
-        self.assertEqual(checks, {"Test / Image"})
+        self.assertEqual(checks, {"CI / Image / Image"})
 
     def test_local_reusable_workflow_uses_caller_ref_when_provided(self) -> None:
         root_workflow = {
             "name": "CI",
-            "jobs": {"test": {"uses": "./.github/workflows/test.yaml"}},
+            "jobs": {
+                "image": {"name": "Image", "uses": "./.github/workflows/test.yaml"}
+            },
         }
         reusable_workflow = {
             "name": "Test",
@@ -103,14 +108,15 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow, workflow_ref="feature/refactor"
         )
 
-        self.assertEqual(checks, {"Test / Image"})
+        self.assertEqual(checks, {"CI / Image / Image"})
 
     def test_nested_reusable_workflow_contexts_are_resolved_transitively(self) -> None:
         root_workflow = {
             "name": "CI",
             "jobs": {
-                "test": {
-                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main"
+                "image": {
+                    "name": "Image",
+                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main",
                 }
             },
         }
@@ -153,14 +159,15 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow
         )
 
-        self.assertEqual(checks, {"Image / Build"})
+        self.assertEqual(checks, {"CI / Image / image / Build"})
 
     def test_reusable_workflow_cycles_do_not_recurse_forever(self) -> None:
         root_workflow = {
             "name": "CI",
             "jobs": {
-                "test": {
-                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main"
+                "image": {
+                    "name": "Image",
+                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main",
                 }
             },
         }
@@ -191,7 +198,7 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow
         )
 
-        self.assertEqual(checks, {"Test / Image"})
+        self.assertEqual(checks, {"CI / Image / Image"})
 
     def test_excluded_checks_apply_within_reusable_workflows(self) -> None:
         enforcer = GitHubRulesetEnforcer(
@@ -200,8 +207,9 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
         root_workflow = {
             "name": "CI",
             "jobs": {
-                "test": {
-                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main"
+                "image": {
+                    "name": "Image",
+                    "uses": "external-owner/actions-workflows/.github/workflows/test.yaml@main",
                 }
             },
         }
@@ -210,7 +218,7 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "on": {"workflow_call": {}},
             "jobs": {
                 "image": {"name": "Image", "runs-on": "ubuntu-latest"},
-                "lint": {"name": "Lint", "runs-on": "ubuntu-latest"},
+                "lint": {"name": "Image", "runs-on": "ubuntu-latest"},
             },
         }
 
@@ -230,7 +238,7 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow
         )
 
-        self.assertEqual(checks, {"Test / Lint"})
+        self.assertEqual(checks, set())
 
     def test_mixed_local_and_remote_nested_reusable_workflows(self) -> None:
         root_workflow = {
@@ -275,7 +283,7 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
             "repo-owner", "app", root_workflow, workflow_ref="feature/refactor"
         )
 
-        self.assertEqual(checks, {"Test / Image"})
+        self.assertEqual(checks, {"CI / local / remote / Image"})
 
 
 if __name__ == "__main__":

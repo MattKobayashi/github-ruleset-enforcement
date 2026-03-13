@@ -159,6 +159,10 @@ class GitHubRulesetEnforcer:
             }
         )
         self.excluded_required_checks: set[str] = set(excluded_required_checks or [])
+        self._workflow_definition_cache: dict[
+            tuple[str, str, str, str], dict | None
+        ] = {}
+        self._repository_default_branch_cache: dict[tuple[str, str], str] = {}
         logger.debug("Initialized GitHubRulesetEnforcer for %s '%s'", owner_type, owner)
 
     def list_repositories(self) -> list[Repository]:
@@ -213,27 +217,33 @@ class GitHubRulesetEnforcer:
         )
 
     def fetch_workflow_definition(
-        self, repository: str, path: str, ref: str
+        self, owner: str, repository: str, path: str, ref: str
     ) -> dict | None:
+        cache_key = (owner, repository, path, ref)
+        if cache_key in self._workflow_definition_cache:
+            return self._workflow_definition_cache[cache_key]
         logger.debug(
-            "Fetching workflow definition for repository '%s', path '%s', ref '%s'",
+            "Fetching workflow definition for repository '%s/%s', path '%s', ref '%s'",
+            owner,
             repository,
             path,
             ref,
         )
         response = self.session.get(
-            f"{GITHUB_API_URL}/repos/{self.owner}/{repository}/contents/{path}",
+            f"{GITHUB_API_URL}/repos/{owner}/{repository}/contents/{path}",
             params={"ref": ref},
             timeout=30,
         )
         if response.status_code == 404:
+            self._workflow_definition_cache[cache_key] = None
             return None
         if response.status_code >= 400:
             raise GitHubAPIError(response.status_code, self._format_error(response))
         payload = response.json()
         content = base64.b64decode(payload["content"]).decode("utf-8")
         logger.debug(
-            "Workflow definition for repository '%s' at '%s' (ref '%s'):\n%s",
+            "Workflow definition for repository '%s/%s' at '%s' (ref '%s'):\n%s",
+            owner,
             repository,
             path,
             ref,
@@ -243,7 +253,9 @@ class GitHubRulesetEnforcer:
             documents = list(yaml.load_all(content, Loader=GitHubWorkflowLoader))
         except yaml.YAMLError as exc:  # pragma: no cover - defensive logging
             raise RuntimeError(f"Failed to parse workflow {path}: {exc}") from exc
-        return documents[0] if documents else None
+        definition = documents[0] if documents else None
+        self._workflow_definition_cache[cache_key] = definition
+        return definition
 
     def collect_required_checks_for_repository(
         self, repository: Repository, branch: str
@@ -272,13 +284,18 @@ class GitHubRulesetEnforcer:
             if workflow.get("state") != "active":
                 continue
             definition = self.fetch_workflow_definition(
-                repository.name, workflow["path"], branch
+                self.owner, repository.name, workflow["path"], branch
             )
             if not definition:
                 continue
             if workflow_targets_branch(definition, branch):
                 checks.update(
-                    extract_job_names(definition, self.excluded_required_checks)
+                    self.extract_job_names_for_workflow(
+                        self.owner,
+                        repository.name,
+                        definition,
+                        workflow_ref=branch,
+                    )
                 )
         logger.debug(
             "Collected %d required checks for repository '%s'",
@@ -286,6 +303,108 @@ class GitHubRulesetEnforcer:
             repository.name,
         )
         return checks
+
+    def extract_job_names_for_workflow(
+        self,
+        owner: str,
+        repository: str,
+        workflow: dict,
+        *,
+        workflow_ref: str | None = None,
+        visited_workflows: set[tuple[str, str, str]] | None = None,
+    ) -> set[str]:
+        visited = set() if visited_workflows is None else visited_workflows
+        workflow_label = workflow_name(workflow, "Workflow")
+        workflow_key = (owner, repository, workflow_label)
+        if workflow_key in visited:
+            logger.debug(
+                "Skipping already-visited workflow '%s' in repository '%s/%s'",
+                workflow_label,
+                owner,
+                repository,
+            )
+            return set()
+
+        visited.add(workflow_key)
+        names: set[str] = set()
+        jobs = workflow.get("jobs") or {}
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+
+            reusable_reference = reusable_workflow_reference(job)
+            if reusable_reference:
+                reusable_owner, reusable_repo, reusable_path, reusable_ref = (
+                    reusable_reference
+                )
+                reusable_definition = self.fetch_workflow_definition(
+                    reusable_owner,
+                    reusable_repo,
+                    reusable_path,
+                    reusable_ref,
+                )
+                if reusable_definition:
+                    names.update(
+                        self.extract_job_names_for_workflow(
+                            reusable_owner,
+                            reusable_repo,
+                            reusable_definition,
+                            workflow_ref=reusable_ref,
+                            visited_workflows=visited,
+                        )
+                    )
+                continue
+
+            local_reusable_path = local_reusable_workflow_path(job)
+            if local_reusable_path:
+                reusable_definition = self.fetch_workflow_definition(
+                    owner,
+                    repository,
+                    local_reusable_path,
+                    workflow_ref or self._default_branch_for_repository(repository),
+                )
+                if reusable_definition:
+                    names.update(
+                        self.extract_job_names_for_workflow(
+                            owner,
+                            repository,
+                            reusable_definition,
+                            workflow_ref=workflow_ref,
+                            visited_workflows=visited,
+                        )
+                    )
+                continue
+
+            job_name = job.get("name") or job_id
+            if job_name in self.excluded_required_checks:
+                logger.debug(
+                    "Skipping job '%s' from required status checks due to exclusion list",
+                    job_name,
+                )
+                continue
+            names.update(
+                extract_job_contexts(
+                    {"name": workflow_label, "jobs": {job_id: job}},
+                    self.excluded_required_checks,
+                )
+            )
+
+        return names
+
+    def _default_branch_for_repository(self, repository: str) -> str:
+        cache_key = (self.owner, repository)
+        if cache_key in self._repository_default_branch_cache:
+            return self._repository_default_branch_cache[cache_key]
+
+        response = self.session.get(
+            f"{GITHUB_API_URL}/repos/{self.owner}/{repository}",
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise GitHubAPIError(response.status_code, self._format_error(response))
+        default_branch = response.json().get("default_branch", "main")
+        self._repository_default_branch_cache[cache_key] = default_branch
+        return default_branch
 
     def find_ruleset(self, repository: str, name: str) -> dict | None:
         logger.debug("Searching for ruleset '%s' in repository '%s'", name, repository)
@@ -373,6 +492,7 @@ class GitHubRulesetEnforcer:
 
         match (bool(existing_summary), dry_run):
             case (True, True):
+                assert existing_summary is not None
                 logger.info(
                     "[dry-run] Would update ruleset '%s' (id=%s) in repository '%s'",
                     payload.get("name"),
@@ -381,6 +501,7 @@ class GitHubRulesetEnforcer:
                 )
                 action = "dry_run_update"
             case (True, False):
+                assert existing_summary is not None
                 self.update_ruleset(repository, existing_summary["id"], payload)
                 action = "updated"
             case (False, True):
@@ -476,8 +597,43 @@ def branch_matches(event_config, branch: str) -> bool:
     return True
 
 
-def extract_job_names(workflow: dict, excluded_checks: set[str]) -> set[str]:
+def workflow_name(workflow: dict, fallback: str) -> str:
+    name = workflow.get("name")
+    return name if isinstance(name, str) and name else fallback
+
+
+def reusable_workflow_reference(job: dict) -> tuple[str, str, str, str] | None:
+    uses = job.get("uses")
+    if not isinstance(uses, str):
+        return None
+
+    match = re.fullmatch(
+        r"(?P<owner>[^/@]+)/(?P<repo>[^/@]+)/\.github/workflows/(?P<path>[^@]+)@(?P<ref>.+)",
+        uses,
+    )
+    if not match:
+        return None
+
+    return (
+        match.group("owner"),
+        match.group("repo"),
+        f".github/workflows/{match.group('path')}",
+        match.group("ref"),
+    )
+
+
+def local_reusable_workflow_path(job: dict) -> str | None:
+    uses = job.get("uses")
+    if not isinstance(uses, str) or not uses.startswith("./"):
+        return None
+    if not uses.startswith("./.github/workflows/"):
+        return None
+    return uses.removeprefix("./")
+
+
+def extract_job_contexts(workflow: dict, excluded_checks: set[str]) -> set[str]:
     jobs = workflow.get("jobs") or {}
+    workflow_label = workflow_name(workflow, "Workflow")
     names: set[str] = set()
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
@@ -488,8 +644,8 @@ def extract_job_names(workflow: dict, excluded_checks: set[str]) -> set[str]:
                 "Skipping job '%s' from required status checks due to exclusion list",
                 job_name,
             )
-        else:
-            names.add(job_name)
+            continue
+        names.add(f"{workflow_label} / {job_name}")
     return names
 
 
@@ -570,9 +726,7 @@ def load_all_templates(templates_dir: str) -> tuple[dict, dict[str, dict]]:
                     source,
                 )
         except json.JSONDecodeError as exc:
-            logger.warning(
-                "Failed to parse template '%s': %s", template_file.name, exc
-            )
+            logger.warning("Failed to parse template '%s': %s", template_file.name, exc)
 
     if default_template is None:
         raise FileNotFoundError(
@@ -726,7 +880,9 @@ def ensure_ruleset_enforcement(
         processed_repositories.append(repo.name)
 
         # Get the appropriate template for this repository
-        template = get_template_for_repository(repo.name, repo_templates, default_template)
+        template = get_template_for_repository(
+            repo.name, repo_templates, default_template
+        )
         repo_ruleset = copy.deepcopy(template)
         ensure_repository_condition(repo_ruleset)
 

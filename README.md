@@ -74,3 +74,9 @@ Pass `--exclude-required-check` (repeatable) to exclude specific workflow job na
 ```shell
 uv run main.py --org my-org --token <token> --exclude-required-check Analyze --exclude-required-check dependency-review
 ```
+
+### Tests
+
+```shell
+uv run python -m unittest tests/test_main.py
+```

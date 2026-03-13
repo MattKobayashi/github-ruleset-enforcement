@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from difflib import unified_diff
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -121,6 +122,30 @@ def rulesets_are_equal(existing: dict, new_payload: dict) -> bool:
                     json.dumps(new_val, indent=2),
                 )
     return are_equal
+
+
+def format_ruleset_diff(existing: dict | None, new_payload: dict) -> str:
+    """Return a unified diff between the existing and proposed ruleset payloads."""
+    if existing is None:
+        existing_payload: dict = {}
+    else:
+        existing_payload = {
+            key: value
+            for key, value in existing.items()
+            if key not in READ_ONLY_RULESET_FIELDS
+        }
+
+    existing_text = json.dumps(existing_payload, indent=2, sort_keys=True).splitlines()
+    new_text = json.dumps(new_payload, indent=2, sort_keys=True).splitlines()
+    return "\n".join(
+        unified_diff(
+            existing_text,
+            new_text,
+            fromfile="existing",
+            tofile="proposed",
+            lineterm="",
+        )
+    )
 
 
 @dataclass
@@ -241,14 +266,6 @@ class GitHubRulesetEnforcer:
             raise GitHubAPIError(response.status_code, self._format_error(response))
         payload = response.json()
         content = base64.b64decode(payload["content"]).decode("utf-8")
-        logger.debug(
-            "Workflow definition for repository '%s/%s' at '%s' (ref '%s'):\n%s",
-            owner,
-            repository,
-            path,
-            ref,
-            content,
-        )
         try:
             documents = list(yaml.load_all(content, Loader=GitHubWorkflowLoader))
         except yaml.YAMLError as exc:  # pragma: no cover - defensive logging
@@ -492,10 +509,15 @@ class GitHubRulesetEnforcer:
         return response.json()
 
     def upsert_ruleset(
-        self, repository: str, definition: dict, dry_run: bool = False
+        self,
+        repository: str,
+        definition: dict,
+        dry_run: bool = False,
+        debug: bool = False,
     ) -> str:
         payload = self._prepare_ruleset_payload(definition)
         existing_summary = self.find_ruleset(repository, definition.get("name", ""))
+        existing: dict | None = None
 
         if existing_summary:
             # Fetch the full ruleset to compare
@@ -508,6 +530,18 @@ class GitHubRulesetEnforcer:
                     repository,
                 )
                 return "unchanged"
+
+        if debug:
+            diff = format_ruleset_diff(existing, payload)
+            if diff:
+                action_label = "proposed" if dry_run else "applying"
+                logger.info(
+                    "Ruleset diff for repository '%s' and ruleset '%s' (%s):\n%s",
+                    repository,
+                    payload.get("name"),
+                    action_label,
+                    diff,
+                )
 
         match (bool(existing_summary), dry_run):
             case (True, True):
@@ -861,6 +895,7 @@ def ensure_ruleset_enforcement(
     templates_dir: str = DEFAULT_TEMPLATES_DIR,
     target_branch: str = "main",
     dry_run: bool = False,
+    debug: bool = False,
     skip_repositories: Sequence[str] | None = None,
     excluded_required_checks: Sequence[str] | None = None,
 ) -> None:
@@ -949,7 +984,12 @@ def ensure_ruleset_enforcement(
         else:
             ensure_required_status_rule(repo_ruleset, required_checks)
 
-        action = enforcer.upsert_ruleset(repo.name, repo_ruleset, dry_run=dry_run)
+        action = enforcer.upsert_ruleset(
+            repo.name,
+            repo_ruleset,
+            dry_run=dry_run,
+            debug=debug,
+        )
         summary[action] += 1
 
     _print_summary(summary, processed_repositories, skipped_repositories, dry_run)
@@ -1036,6 +1076,11 @@ def parse_args() -> argparse.Namespace:
         help="Show proposed ruleset changes without applying them",
     )
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show diff-style ruleset changes for each repository",
+    )
+    parser.add_argument(
         "--skip-repository",
         "--skip-repo",
         dest="skip_repositories",
@@ -1066,10 +1111,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     numeric_level = getattr(logging, log_level_name, logging.INFO)
+    args = parse_args()
+    if args.debug and numeric_level > logging.DEBUG:
+        numeric_level = logging.DEBUG
     logging.basicConfig(
         level=numeric_level, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
-    args = parse_args()
     owner = args.org or args.user
     owner_type = "org" if args.org else "user"
     ensure_ruleset_enforcement(
@@ -1079,6 +1126,7 @@ def main() -> None:
         templates_dir=args.templates_dir,
         target_branch=args.target_branch,
         dry_run=args.dry_run,
+        debug=args.debug,
         skip_repositories=args.skip_repositories,
         excluded_required_checks=args.excluded_required_checks,
     )

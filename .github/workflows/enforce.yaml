@@ -16,6 +16,7 @@ jobs:
       - name: Execute enforcement script
         run: |
           uv run main.py \
+            --debug \
             --exclude-required-check Analyze \
             --exclude-required-check dependency-review \
             --token ${{ secrets.GH_ENFORCE_PAT }} \

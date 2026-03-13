@@ -294,6 +294,7 @@ class GitHubRulesetEnforcer:
                         self.owner,
                         repository.name,
                         definition,
+                        include_workflow_name=False,
                         workflow_ref=branch,
                     )
                 )
@@ -310,6 +311,7 @@ class GitHubRulesetEnforcer:
         repository: str,
         workflow: dict,
         *,
+        include_workflow_name: bool = True,
         workflow_ref: str | None = None,
         visited_workflows: set[tuple[str, str, str]] | None = None,
     ) -> set[str]:
@@ -349,6 +351,7 @@ class GitHubRulesetEnforcer:
                             reusable_owner,
                             reusable_repo,
                             reusable_definition,
+                            include_workflow_name=True,
                             workflow_ref=reusable_ref,
                             visited_workflows=visited,
                         )
@@ -369,6 +372,7 @@ class GitHubRulesetEnforcer:
                             owner,
                             repository,
                             reusable_definition,
+                            include_workflow_name=True,
                             workflow_ref=workflow_ref,
                             visited_workflows=visited,
                         )
@@ -386,6 +390,7 @@ class GitHubRulesetEnforcer:
                 extract_job_contexts(
                     {"name": workflow_label, "jobs": {job_id: job}},
                     self.excluded_required_checks,
+                    include_workflow_name=include_workflow_name,
                 )
             )
 
@@ -631,7 +636,12 @@ def local_reusable_workflow_path(job: dict) -> str | None:
     return uses.removeprefix("./")
 
 
-def extract_job_contexts(workflow: dict, excluded_checks: set[str]) -> set[str]:
+def extract_job_contexts(
+    workflow: dict,
+    excluded_checks: set[str],
+    *,
+    include_workflow_name: bool = True,
+) -> set[str]:
     jobs = workflow.get("jobs") or {}
     workflow_label = workflow_name(workflow, "Workflow")
     names: set[str] = set()
@@ -645,7 +655,9 @@ def extract_job_contexts(workflow: dict, excluded_checks: set[str]) -> set[str]:
                 job_name,
             )
             continue
-        names.add(f"{workflow_label} / {job_name}")
+        names.add(
+            f"{workflow_label} / {job_name}" if include_workflow_name else job_name
+        )
     return names
 
 

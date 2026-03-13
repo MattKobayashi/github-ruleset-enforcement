@@ -40,6 +40,21 @@ class ReusableWorkflowResolutionTests(unittest.TestCase):
 
         self.assertEqual(checks, {"Test / Image"})
 
+    def test_repository_defined_workflow_uses_job_name_only(self) -> None:
+        workflow = {
+            "name": "CI",
+            "jobs": {
+                "lint": {"name": "Lint", "runs-on": "ubuntu-latest"},
+                "test": {"runs-on": "ubuntu-latest"},
+            },
+        }
+
+        checks = self.enforcer.extract_job_names_for_workflow(
+            "repo-owner", "app", workflow, include_workflow_name=False
+        )
+
+        self.assertEqual(checks, {"Lint", "test"})
+
     def test_local_reusable_workflow_context_uses_default_branch(self) -> None:
         root_workflow = {
             "name": "CI",

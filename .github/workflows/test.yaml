@@ -1,0 +1,32 @@
+---
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      # Checkout the repository
+      # https://github.com/actions/checkout
+      - name: Checkout the repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      # Set up uv
+      # https://github.com/astral-sh/setup-uv
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+      # Execute the enforcement script (dry-run)
+      - name: Execute enforcement script (dry-run)
+        run: |
+          uv run main.py \
+            --debug \
+            --dry-run \
+            --exclude-required-check Analyze \
+            --exclude-required-check dependency-review \
+            --token ${{ secrets.GH_ENFORCE_PAT }} \
+            --user MattKobayashi
+name: Test
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read

@@ -11,7 +11,7 @@ jobs:
       # Set up uv
       # https://github.com/astral-sh/setup-uv
       - name: Set up uv
-        uses: astral-sh/setup-uv@e06108dd0aef18192324c70427afc47652e63a82 # v7.5.0
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       # Execute the enforcement script (dry-run)
       - name: Execute enforcement script (dry-run)
         run: |

@@ -19,6 +19,7 @@ jobs:
             --debug \
             --exclude-required-check Analyze \
             --exclude-required-check dependency-review \
+            --exclude-required-check "Create Draft Release" \
             --token ${{ secrets.GH_ENFORCE_PAT }} \
             --user MattKobayashi
 name: Enforce Repository Rulesets

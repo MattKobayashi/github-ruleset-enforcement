@@ -11,8 +11,8 @@ import json
 import logging
 import os
 import re
-from difflib import unified_diff
 from collections import Counter
+from difflib import unified_diff
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,11 +360,6 @@ class GitHubRulesetEnforcer:
                 )
                 continue
 
-            next_prefix = (
-                (*context_prefix, workflow_label, job_name)
-                if include_workflow_name
-                else (*context_prefix, job_name)
-            )
             reusable_prefix = (*context_prefix, workflow_label, job_name)
             if not include_workflow_name:
                 reusable_prefix = (*context_prefix, job_name)
@@ -631,7 +626,7 @@ def normalize_events(triggers) -> dict:
         case str():
             return {triggers: None}
         case list():
-            return {event: None for event in triggers}
+            return dict.fromkeys(triggers)
         case dict():
             return triggers
         case _:
@@ -918,6 +913,7 @@ def ensure_ruleset_enforcement(
     summary: Counter = Counter()
     processed_repositories: list[str] = []
     skipped_repositories: list[str] = []
+    changes: list[tuple[str, str]] = []
     skip_set: set[str] = {repo.lower() for repo in (skip_repositories or [])}
     repositories = enforcer.list_repositories()
     logger.info("Found %d repositories to evaluate", len(repositories))
@@ -991,8 +987,11 @@ def ensure_ruleset_enforcement(
             debug=debug,
         )
         summary[action] += 1
+        changes.append((repo.name, action))
 
-    _print_summary(summary, processed_repositories, skipped_repositories, dry_run)
+    _print_summary(
+        summary, processed_repositories, skipped_repositories, dry_run, changes
+    )
 
 
 def _extract_existing_status_checks(ruleset: dict) -> set[str]:
@@ -1012,11 +1011,29 @@ def _extract_existing_status_checks(ruleset: dict) -> set[str]:
     return checks
 
 
+_CHANGE_LABELS: dict[str, str] = {
+    "created": "Created",
+    "updated": "Updated",
+    "unchanged": "Already up-to-date",
+    "dry_run_create": "Would create",
+    "dry_run_update": "Would update",
+}
+
+
 def _print_summary(
-    summary: Counter, processed: list[str], skipped: list[str], dry_run: bool
+    summary: Counter,
+    processed: list[str],
+    skipped: list[str],
+    dry_run: bool,
+    changes: list[tuple[str, str]] | None = None,
 ) -> None:
     mode = "dry-run" if dry_run else "execution"
-    logger.info("\n===== Ruleset enforcement %s summary =====", mode)
+    border = "=" * 60
+    logger.info("")
+    logger.info(border)
+    logger.info("  Ruleset enforcement %s summary", mode)
+    logger.info(border)
+
     if processed:
         logger.info(
             "Processed repositories (%d): %s",
@@ -1029,6 +1046,8 @@ def _print_summary(
         logger.info(
             "Skipped repositories (%d): %s", len(skipped), ", ".join(sorted(skipped))
         )
+
+    # Aggregate counts
     actions = {
         "created": "Rulesets created",
         "updated": "Rulesets updated",
@@ -1041,6 +1060,32 @@ def _print_summary(
             logger.info("%s: %d", label, summary[key])
     if not any(summary.values()):
         logger.info("No ruleset changes were required")
+
+    # Per-repository change list (skip 'unchanged' entries to keep it concise)
+    if changes:
+        actionable = [
+            (repo, action) for repo, action in changes if action != "unchanged"
+        ]
+        if actionable:
+            heading = "Proposed changes" if dry_run else "Changes applied"
+            logger.info("")
+            logger.info("-" * 60)
+            logger.info("  %s (%d)", heading, len(actionable))
+            logger.info("-" * 60)
+            for key, label in actions.items():
+                repos_for_action = sorted(
+                    repo for repo, action in actionable if action == key
+                )
+                if repos_for_action:
+                    symbol = "~" if dry_run else "✓"
+                    logger.info("  %s %s:", symbol, label)
+                    for repo in repos_for_action:
+                        logger.info("      - %s", repo)
+        else:
+            logger.info("")
+            logger.info("All rulesets are already up-to-date; no changes were needed.")
+
+    logger.info(border)
 
 
 def parse_args() -> argparse.Namespace:
